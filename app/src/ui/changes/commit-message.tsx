@@ -20,9 +20,12 @@ import { FocusContainer } from '../lib/focus-container'
 import { Octicon, OcticonSymbol } from '../octicons'
 import { IAuthor } from '../../models/author'
 import { IMenuItem } from '../../lib/menu-item'
-import { ICommitContext } from '../../models/commit'
+import { Commit, ICommitContext } from '../../models/commit'
 import { startTimer } from '../lib/timing'
-import { PermissionsCommitWarning } from './permissions-commit-warning'
+import {
+  PermissionsCommitWarning,
+  PermissionsCommitWarningIcon,
+} from './permissions-commit-warning'
 import { LinkButton } from '../lib/link-button'
 import { FoldoutType } from '../../lib/app-state'
 import { IAvatarUser, getAvatarUserFromAuthor } from '../../models/avatar'
@@ -59,6 +62,7 @@ interface ICommitMessageProps {
   readonly dispatcher: Dispatcher
   readonly autocompletionProviders: ReadonlyArray<IAutocompletionProvider<any>>
   readonly isCommitting?: boolean
+  readonly commitToAmend: Commit | null
   readonly placeholder: string
   readonly prepopulateCommitSummary: boolean
   readonly showBranchProtected: boolean
@@ -178,16 +182,36 @@ export class CommitMessage extends React.Component<
    */
   public componentWillReceiveProps(nextProps: ICommitMessageProps) {
     const { commitMessage } = nextProps
+
+    // If we switch from not amending to amending, we want to populate the
+    // textfields with the commit message from the commit.
+    if (this.props.commitToAmend === null && nextProps.commitToAmend !== null) {
+      this.fillWithCommitMessage({
+        summary: nextProps.commitToAmend.summary,
+        description: nextProps.commitToAmend.body,
+      })
+    } else if (
+      this.props.commitToAmend !== null &&
+      nextProps.commitToAmend === null &&
+      commitMessage !== null
+    ) {
+      this.fillWithCommitMessage(commitMessage)
+    }
+
     if (!commitMessage || commitMessage === this.props.commitMessage) {
       return
     }
 
     if (this.state.summary === '' && !this.state.description) {
-      this.setState({
-        summary: commitMessage.summary,
-        description: commitMessage.description,
-      })
+      this.fillWithCommitMessage(commitMessage)
     }
+  }
+
+  private fillWithCommitMessage(commitMessage: ICommitMessage) {
+    this.setState({
+      summary: commitMessage.summary,
+      description: commitMessage.description,
+    })
   }
 
   public componentDidUpdate(prevProps: ICommitMessageProps) {
@@ -251,7 +275,7 @@ export class CommitMessage extends React.Component<
   private async createCommit() {
     const { summary, description } = this.state
 
-    if (!this.canCommit()) {
+    if (!this.canCommit() && !this.canAmend()) {
       return
     }
 
@@ -266,6 +290,7 @@ export class CommitMessage extends React.Component<
       summary: summaryOrPlaceholder,
       description,
       trailers,
+      amend: this.props.commitToAmend !== null,
     }
 
     const timer = startTimer('create commit', this.props.repository)
@@ -281,6 +306,13 @@ export class CommitMessage extends React.Component<
     return (
       (this.props.anyFilesSelected === true && this.state.summary.length > 0) ||
       this.props.prepopulateCommitSummary
+    )
+  }
+
+  private canAmend(): boolean {
+    return (
+      this.props.commitToAmend !== null &&
+      (this.state.summary.length > 0 || this.props.prepopulateCommitSummary)
     )
   }
 
@@ -559,15 +591,27 @@ export class CommitMessage extends React.Component<
 
   private renderPermissionsCommitWarning() {
     const {
+      commitToAmend,
       showBranchProtected,
       showNoWriteAccess,
       repository,
       branch,
     } = this.props
 
-    if (showNoWriteAccess) {
+    if (commitToAmend !== null) {
       return (
-        <PermissionsCommitWarning>
+        <PermissionsCommitWarning
+          icon={PermissionsCommitWarningIcon.Information}
+        >
+          Your changes will be applied to your{' '}
+          <strong>most recent commit</strong>.{' '}
+          <LinkButton onClick={this.onStopAmending}>Stop amending</LinkButton>{' '}
+          to go back to normal.
+        </PermissionsCommitWarning>
+      )
+    } else if (showNoWriteAccess) {
+      return (
+        <PermissionsCommitWarning icon={PermissionsCommitWarningIcon.Warning}>
           You don't have write access to <strong>{repository.name}</strong>.
           Want to{' '}
           <LinkButton onClick={this.onMakeFork}>create a fork</LinkButton>?
@@ -583,7 +627,7 @@ export class CommitMessage extends React.Component<
       }
 
       return (
-        <PermissionsCommitWarning>
+        <PermissionsCommitWarning icon={PermissionsCommitWarningIcon.Warning}>
           <strong>{branch}</strong> is a protected branch. Want to{' '}
           <LinkButton onClick={this.onSwitchBranch}>switch branches</LinkButton>
           ?
@@ -606,11 +650,17 @@ export class CommitMessage extends React.Component<
     }
   }
 
+  private onStopAmending = () => {
+    this.props.dispatcher.setAmendingRepository(this.props.repository, false)
+  }
+
   private renderSubmitButton() {
     const { isCommitting } = this.props
     const isSummaryWhiteSpace = this.state.summary.match(/^\s+$/g)
     const buttonEnabled =
-      this.canCommit() && isCommitting !== true && !isSummaryWhiteSpace
+      (this.canCommit() || this.canAmend()) &&
+      isCommitting !== true &&
+      !isSummaryWhiteSpace
 
     return (
       <Button
@@ -628,17 +678,26 @@ export class CommitMessage extends React.Component<
     const { isCommitting, branch: branchName, commitButtonText } = this.props
 
     const loading = isCommitting === true ? <Loading /> : undefined
-    const commitVerb = loading ? 'Committing' : 'Commit'
+
+    const isAmending = this.props.commitToAmend !== null
+    const commitVerb = isAmending
+      ? loading
+        ? 'Amending'
+        : 'Amend'
+      : loading
+      ? 'Committing'
+      : 'Commit'
     const commitTitle =
       branchName !== null ? `${commitVerb} to ${branchName}` : commitVerb
-    const defaultContents =
-      branchName !== null ? (
-        <>
-          {commitVerb} to <strong>{branchName}</strong>
-        </>
-      ) : (
-        commitVerb
-      )
+    const defaultContents = isAmending ? (
+      <>{commitVerb} last commit</>
+    ) : branchName !== null ? (
+      <>
+        {commitVerb} to <strong>{branchName}</strong>
+      </>
+    ) : (
+      commitVerb
+    )
 
     const commitButton = commitButtonText ? commitButtonText : defaultContents
 
